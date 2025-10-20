@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BuFlood Watch</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <video autoplay muted loop playsinline class="background-video">
+        <source src="https://cdn.coverr.co/videos/coverr-aerial-view-of-waterfall-7661/1080p.mp4" type="video/mp4">
+    </video>
+    <div class="overlay"></div>
+
+    <header class="hero">
+        <div class="status-pill {{ 'flooding' if status.is_flooding else 'dry' }}">{{ status.status }}</div>
+        <h1 class="headline">Community Flood Watch</h1>
+        <p class="status-message">{{ status.message }}</p>
+        {% if status.level is not none %}
+            <p class="level">Estimated flood level: <strong>{{ status.level }} m</strong></p>
+        {% endif %}
+        <p class="reports">Live data from {{ report_count }} report{{ '' if report_count == 1 else 's' }}</p>
+        {% if request.args.get('thanks') %}
+            <p class="flash success">Thank you for submitting your report!</p>
+        {% elif request.args.get('invalid') %}
+            <p class="flash error">Please provide a valid, non-negative flood level.</p>
+        {% endif %}
+    </header>
+
+    <main class="content">
+        <section class="panel">
+            <h2>Share what you see</h2>
+            <form action="{{ url_for('report') }}" method="post" class="report-form">
+                <div class="button-group">
+                    <button type="submit" name="flooded" value="yes" class="btn flood">Flooding</button>
+                    <button type="submit" name="flooded" value="no" class="btn clear">Not flooded</button>
+                </div>
+                <label for="level" class="field-label">Optional: Flood depth (meters)</label>
+                <input type="number" step="0.01" min="0" name="level" id="level" placeholder="e.g. 0.45">
+                <p class="hint">We use the crowd data to update the main status. Matching flood level readings help confirm flooding.</p>
+            </form>
+        </section>
+
+        <section class="panel info">
+            <h2>How it works</h2>
+            <ul>
+                <li>The dashboard starts in monitoring mode until we receive at least {{ MIN_REPORTS_FOR_STATUS }} community reports.</li>
+                <li>When over 60% of reports indicate flooding and flood levels agree, the status flips to <strong>Flooding</strong>.</li>
+                <li>Average flood depth is displayed when measurements are consistent.</li>
+                <li>Stay safe and continue sharing updates with your neighbors.</li>
+            </ul>
+        </section>
+    </main>
+</body>
+</html>
