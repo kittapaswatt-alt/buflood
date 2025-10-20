@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BuFlood Watch</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <video autoplay muted loop playsinline class="background-video">
+        <source src="https://cdn.coverr.co/videos/coverr-aerial-view-of-waterfall-7661/1080p.mp4" type="video/mp4">
+    </video>
+    <div class="overlay"></div>
+
+    <header class="hero">
+        <div class="status-pill {{ 'flooding' if status.is_flooding else 'dry' }}">{{ status.status }}</div>
+        <h1 class="headline">Community Flood Watch</h1>
+        <p class="status-message">{{ status.message }}</p>
+        {% if status.level_label %}
+            <p class="level">Consensus impact: <strong>{{ status.level_label }}</strong></p>
+        {% endif %}
+        <p class="reports">Live data from {{ report_count }} report{{ '' if report_count == 1 else 's' }}</p>
+        {% if request.args.get('thanks') %}
+            <p class="flash success">Thank you for submitting your report!</p>
+        {% elif request.args.get('invalid') %}
+            <p class="flash error">Please choose valid options before submitting.</p>
+        {% endif %}
+    </header>
+
+    <main class="content">
+        <section class="panel">
+            <h2>Share what you see</h2>
+            <form action="{{ url_for('report') }}" method="post" class="report-form">
+                <fieldset class="choice-group">
+                    <legend class="field-label">What's the situation?</legend>
+                    <div class="choice-buttons">
+                        <input type="radio" id="status-flood" name="flooded" value="yes" required>
+                        <label for="status-flood" class="btn flood">Flooding</label>
+                        <input type="radio" id="status-clear" name="flooded" value="no" required>
+                        <label for="status-clear" class="btn clear">Not flooded</label>
+                    </div>
+                </fieldset>
+
+                <fieldset class="choice-group">
+                    <legend class="field-label">Optional: How bad is the water?</legend>
+                    <p class="hint">Pick the option that best matches current conditions when you choose "Flooding".</p>
+                    <div class="severity-options">
+                        {% for value, option in level_options.items() %}
+                            <input type="radio" id="impact-{{ value }}" name="level_category" value="{{ value }}">
+                            <label for="impact-{{ value }}" class="severity-card">{{ option.label }}</label>
+                        {% endfor %}
+                    </div>
+                </fieldset>
+
+                <button type="submit" class="btn submit">Send report</button>
+            </form>
+        </section>
+
+        <section class="panel info">
+            <h2>How it works</h2>
+            <ul>
+                <li>The dashboard starts in monitoring mode until we receive at least {{ MIN_REPORTS_FOR_STATUS }} community reports.</li>
+                <li>When over 60% of reports indicate flooding and impact reports agree, the status flips to <strong>Flooding</strong>.</li>
+                <li>The consensus impact (walkable, motorcycle can't pass, car can't pass) is displayed when neighbors agree.</li>
+                <li>Stay safe and continue sharing updates with your neighbors.</li>
+            </ul>
+        </section>
+    </main>
+</body>
+</html>
