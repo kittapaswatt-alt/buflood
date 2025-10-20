@@ -135,13 +135,22 @@ body {
     gap: 1.5rem;
 }
 
-.button-group {
+.choice-group {
+    margin: 0;
+    padding: 0;
+    border: none;
+}
+
+.choice-buttons {
     display: flex;
     gap: 1rem;
 }
 
+.choice-buttons input[type="radio"] {
+    display: none;
+}
+
 .btn {
-    flex: 1;
     padding: 1rem 0;
     border-radius: 0.75rem;
     border: none;
@@ -150,6 +159,14 @@ body {
     cursor: pointer;
     transition: transform 0.2s ease, box-shadow 0.2s ease;
     color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-decoration: none;
+}
+
+.choice-buttons .btn {
+    flex: 1;
 }
 
 .btn.flood {
@@ -158,6 +175,17 @@ body {
 
 .btn.clear {
     background: linear-gradient(135deg, #0f8f5d, #34d399);
+}
+
+.choice-buttons input[type="radio"]:checked + .btn {
+    box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.3);
+    transform: translateY(-2px);
+}
+
+.btn.submit {
+    background: linear-gradient(135deg, #2563eb, #3b82f6);
+    border: none;
+    width: 100%;
 }
 
 .btn:hover {
@@ -170,17 +198,33 @@ body {
     color: var(--text-muted);
 }
 
-input[type="number"] {
-    padding: 0.85rem 1rem;
-    border-radius: 0.75rem;
-    border: none;
-    font-size: 1rem;
-    background: rgba(255, 255, 255, 0.12);
-    color: var(--text-light);
+.severity-options {
+    display: grid;
+    gap: 0.75rem;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
 }
 
-input[type="number"]::placeholder {
-    color: rgba(241, 247, 251, 0.5);
+.severity-options input[type="radio"] {
+    display: none;
+}
+
+.severity-card {
+    display: block;
+    padding: 0.9rem 1rem;
+    border-radius: 0.85rem;
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text-light);
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: border 0.2s ease, transform 0.2s ease, background 0.2s ease;
+    font-weight: 600;
+    text-align: center;
+}
+
+.severity-options input[type="radio"]:checked + .severity-card {
+    border-color: rgba(59, 130, 246, 0.6);
+    background: rgba(37, 99, 235, 0.25);
+    transform: translateY(-2px);
 }
 
 .hint {
@@ -196,7 +240,7 @@ input[type="number"]::placeholder {
 }
 
 @media (max-width: 600px) {
-    .button-group {
+    .choice-buttons {
         flex-direction: column;
     }
 }

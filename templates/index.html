@@ -19,14 +19,14 @@
         <div class="status-pill {{ 'flooding' if status.is_flooding else 'dry' }}">{{ status.status }}</div>
         <h1 class="headline">Community Flood Watch</h1>
         <p class="status-message">{{ status.message }}</p>
-        {% if status.level is not none %}
-            <p class="level">Estimated flood level: <strong>{{ status.level }} m</strong></p>
+        {% if status.level_label %}
+            <p class="level">Consensus impact: <strong>{{ status.level_label }}</strong></p>
         {% endif %}
         <p class="reports">Live data from {{ report_count }} report{{ '' if report_count == 1 else 's' }}</p>
         {% if request.args.get('thanks') %}
             <p class="flash success">Thank you for submitting your report!</p>
         {% elif request.args.get('invalid') %}
-            <p class="flash error">Please provide a valid, non-negative flood level.</p>
+            <p class="flash error">Please choose valid options before submitting.</p>
         {% endif %}
     </header>
 
@@ -34,13 +34,28 @@
         <section class="panel">
             <h2>Share what you see</h2>
             <form action="{{ url_for('report') }}" method="post" class="report-form">
-                <div class="button-group">
-                    <button type="submit" name="flooded" value="yes" class="btn flood">Flooding</button>
-                    <button type="submit" name="flooded" value="no" class="btn clear">Not flooded</button>
-                </div>
-                <label for="level" class="field-label">Optional: Flood depth (meters)</label>
-                <input type="number" step="0.01" min="0" name="level" id="level" placeholder="e.g. 0.45">
-                <p class="hint">We use the crowd data to update the main status. Matching flood level readings help confirm flooding.</p>
+                <fieldset class="choice-group">
+                    <legend class="field-label">What's the situation?</legend>
+                    <div class="choice-buttons">
+                        <input type="radio" id="status-flood" name="flooded" value="yes" required>
+                        <label for="status-flood" class="btn flood">Flooding</label>
+                        <input type="radio" id="status-clear" name="flooded" value="no" required>
+                        <label for="status-clear" class="btn clear">Not flooded</label>
+                    </div>
+                </fieldset>
+
+                <fieldset class="choice-group">
+                    <legend class="field-label">Optional: How bad is the water?</legend>
+                    <p class="hint">Pick the option that best matches current conditions when you choose "Flooding".</p>
+                    <div class="severity-options">
+                        {% for value, option in level_options.items() %}
+                            <input type="radio" id="impact-{{ value }}" name="level_category" value="{{ value }}">
+                            <label for="impact-{{ value }}" class="severity-card">{{ option.label }}</label>
+                        {% endfor %}
+                    </div>
+                </fieldset>
+
+                <button type="submit" class="btn submit">Send report</button>
             </form>
         </section>
 
@@ -48,8 +63,8 @@
             <h2>How it works</h2>
             <ul>
                 <li>The dashboard starts in monitoring mode until we receive at least {{ MIN_REPORTS_FOR_STATUS }} community reports.</li>
-                <li>When over 60% of reports indicate flooding and flood levels agree, the status flips to <strong>Flooding</strong>.</li>
-                <li>Average flood depth is displayed when measurements are consistent.</li>
+                <li>When over 60% of reports indicate flooding and impact reports agree, the status flips to <strong>Flooding</strong>.</li>
+                <li>The consensus impact (walkable, motorcycle can't pass, car can't pass) is displayed when neighbors agree.</li>
                 <li>Stay safe and continue sharing updates with your neighbors.</li>
             </ul>
         </section>
