@@ -18,7 +18,7 @@ LEVEL_OPTIONS = OrderedDict(
         (
             "walkable",
             {
-                "label": "Still walkable",
+                "label": "walkable",
                 "status_message": "Flooding reported, but streets remain walkable. Avoid low spots.",
             },
         ),
