@@ -5,9 +5,14 @@ from pathlib import Path
 from typing import Optional
 import sqlite3
 import os
+import threading
+import time
 from flask import Flask, redirect, render_template, request, url_for
 
 app = Flask(__name__)
+
+last_reset_time = time.time()
+new_data_since_last_reset = False
 
 MIN_REPORTS_FOR_STATUS = 3
 
@@ -66,12 +71,50 @@ def get_reports() -> list[sqlite3.Row]:
 
 
 def save_report(flooded: bool, level_category: Optional[str]) -> None:
+    global new_data_since_last_reset
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
             "INSERT INTO reports (flooded, level_category) VALUES (?, ?)",
             (1 if flooded else 0, level_category),
         )
         conn.commit()
+    if time.time() - last_reset_time > 60:
+        new_data_since_last_reset = True
+
+
+def conditional_db_reset():
+    """
+    Checks if 10 minutes have passed and new data has been added.
+    If so, it clears the database and keeps only the last report.
+    """
+    global last_reset_time, new_data_since_last_reset
+    if time.time() - last_reset_time > 60 and new_data_since_last_reset:
+        print("Idle time expired and new data received, resetting database and keeping the latest report.")
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            # Get the last record
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM reports ORDER BY created_at DESC LIMIT 5")
+            last_reports = cursor.fetchall()
+
+            # Clear the table
+            conn.execute("DELETE FROM reports")
+
+            # Insert the last 5 records back
+            if last_reports:
+                for report in last_reports:
+                    conn.execute(
+                        "INSERT INTO reports (flooded, level_category, created_at) VALUES (?, ?, ?)",
+                        (report["flooded"], report["level_category"], report["created_at"]),
+                    )
+            conn.commit()
+
+        last_reset_time = time.time()
+        new_data_since_last_reset = False
+
+    threading.Timer(60, conditional_db_reset).start()
+
+conditional_db_reset()
 
 
 def compute_status() -> tuple[dict, int]:

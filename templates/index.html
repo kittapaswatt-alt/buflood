@@ -52,8 +52,6 @@
                         {% endfor %}
                     </div>
                 </fieldset>
-
-                <button type="submit" class="btn submit">Send report</button>
             </form>
         </section>
 
@@ -67,5 +65,18 @@
             </ul>
         </section>
     </main>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            const form = document.querySelector('.report-form');
+            const floodStatusButtons = document.querySelectorAll('input[name="flooded"]');
+            const levelButtons = document.querySelectorAll('input[name="level_category"]');
+            floodStatusButtons.forEach(button => {
+                button.addEventListener('change', () => {
+                        form.submit();
+                });
+            });
+        });
+    </script>
 </body>
 </html>
