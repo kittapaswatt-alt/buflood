@@ -78,7 +78,7 @@ def save_report(flooded: bool, level_category: Optional[str]) -> None:
             (1 if flooded else 0, level_category),
         )
         conn.commit()
-    if time.time() - last_reset_time > 60:
+    if time.time() - last_reset_time > 600:
         new_data_since_last_reset = True
 
 
