@@ -4,14 +4,15 @@ from collections import Counter, OrderedDict
 from pathlib import Path
 from typing import Optional
 import sqlite3
-
+import os
 from flask import Flask, redirect, render_template, request, url_for
 
 app = Flask(__name__)
 
 MIN_REPORTS_FOR_STATUS = 3
 
-DB_PATH = Path("data/flood_reports.db")
+_default_db_dir = Path(os.environ.get("DATABASE_DIR", "/tmp/buflood"))
+DB_PATH = Path(os.environ.get("DATABASE_PATH", _default_db_dir / "flood_reports.db"))
 
 LEVEL_OPTIONS = OrderedDict(
     [
