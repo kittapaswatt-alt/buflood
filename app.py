@@ -13,6 +13,7 @@ app = Flask(__name__)
 
 last_reset_time = time.time()
 new_data_since_last_reset = False
+_lock = threading.Lock()
 
 MIN_REPORTS_FOR_STATUS = 3
 
@@ -63,6 +64,20 @@ def init_db() -> None:
 
 init_db()
 
+def _reset_db_keep_last_5(conn: sqlite3.Connection) -> None:
+    """
+    Delete everything except the 5 most recent rows by created_at.
+    """
+    # Using rowid to avoid reinsert; faster and atomic within this transaction.
+    conn.execute("""
+                 DELETE FROM reports
+                 WHERE rowid NOT IN (
+                     SELECT rowid FROM reports
+                     ORDER BY created_at DESC
+                     LIMIT 5
+                 )
+                 """)
+    conn.commit()
 
 def get_reports() -> list[sqlite3.Row]:
     with sqlite3.connect(DB_PATH) as conn:
@@ -71,50 +86,27 @@ def get_reports() -> list[sqlite3.Row]:
 
 
 def save_report(flooded: bool, level_category: Optional[str]) -> None:
-    global new_data_since_last_reset
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            "INSERT INTO reports (flooded, level_category) VALUES (?, ?)",
-            (1 if flooded else 0, level_category),
-        )
-        conn.commit()
-    if time.time() - last_reset_time > 600:
-        new_data_since_last_reset = True
+    global new_data_since_last_reset, last_reset_time
 
+    now = time.time()
 
-def conditional_db_reset():
-    """
-    Checks if 10 minutes have passed and new data has been added.
-    If so, it clears the database and keeps only the last report.
-    """
-    global last_reset_time, new_data_since_last_reset
-    if time.time() - last_reset_time > 60 and new_data_since_last_reset:
-        print("Idle time expired and new data received, resetting database and keeping the latest report.")
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.row_factory = sqlite3.Row
-            # Get the last record
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM reports ORDER BY created_at DESC LIMIT 5")
-            last_reports = cursor.fetchall()
-
-            # Clear the table
-            conn.execute("DELETE FROM reports")
-
-            # Insert the last 5 records back
-            if last_reports:
-                for report in last_reports:
-                    conn.execute(
-                        "INSERT INTO reports (flooded, level_category, created_at) VALUES (?, ?, ?)",
-                        (report["flooded"], report["level_category"], report["created_at"]),
-                    )
+    with _lock:
+        with sqlite3.connect(DB_PATH, timeout=5) as conn:
+            conn.execute(
+                "INSERT INTO reports (flooded, level_category) VALUES (?, ?)",
+                (1 if flooded else 0, level_category),
+            )
             conn.commit()
 
-        last_reset_time = time.time()
-        new_data_since_last_reset = False
+            # Mark that new data came in during this cycle.
+            new_data_since_last_reset = True
 
-    threading.Timer(60, conditional_db_reset).start()
-
-conditional_db_reset()
+            # If it's been >= 10 minutes since the last reset AND we have new data,
+            # perform a reset and start a fresh 10-minute window.
+            if (now - last_reset_time) >= 600 and new_data_since_last_reset:
+                _reset_db_keep_last_5(conn)
+                last_reset_time = now
+                new_data_since_last_reset = False
 
 
 def compute_status() -> tuple[dict, int]:
