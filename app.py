@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from collections import Counter, OrderedDict
-from pathlib import Path
-from typing import Optional
-import sqlite3
 import os
+from typing import Optional
 import threading
 import time
+
+import psycopg
+from psycopg.rows import dict_row
 from flask import Flask, redirect, render_template, request, url_for
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
 
 app = Flask(__name__)
 
@@ -17,8 +21,27 @@ _lock = threading.Lock()
 
 MIN_REPORTS_FOR_STATUS = 3
 
-_default_db_dir = Path(os.environ.get("DATABASE_DIR", "/tmp/buflood"))
-DB_PATH = Path(os.environ.get("DATABASE_PATH", _default_db_dir / "flood_reports.db"))
+connection: Optional[psycopg.Connection] = None
+cursor: Optional[psycopg.Cursor] = None
+
+USER = "postgres"
+PASSWORD = ".Y-r+29YyHAc25*"
+HOST = "db.hmmnvgilhcmofciknllv.supabase.co"
+PORT = 5432
+DBNAME = "postgres"
+
+LINE_CHANNEL_SECRET = "d75e574d2c33a695d809b1df16553ad3"
+LINE_CHANNEL_ACCESS_TOKEN = "As4hEcmScsiZMrTmIMreUQ9EHm3MZUTVHhMYjr8jYBZwQ5AgI40J42t9c+r+JigZLmfpAILZ3KUpq0xwp8ULAtSX7MdmfmcaG0inOUBgq8cPPlekYWuUOBscDb2fbOpgj6JRgf57amWKWKngeKBmrQdB04t89/1O/w1cDnyilFU="
+
+line_bot_api: Optional[LineBotApi]
+webhook_handler: Optional[WebhookHandler]
+
+if LINE_CHANNEL_SECRET and LINE_CHANNEL_ACCESS_TOKEN:
+    line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+    webhook_handler = WebhookHandler(LINE_CHANNEL_SECRET)
+else:
+    line_bot_api = None
+    webhook_handler = None
 
 LEVEL_OPTIONS = OrderedDict(
     [
@@ -48,41 +71,65 @@ LEVEL_OPTIONS = OrderedDict(
 
 
 def init_db() -> None:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS reports (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                flooded INTEGER NOT NULL,
-                level_category TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """
+    global connection, cursor
+
+    connection = psycopg.connect(
+        user=USER,
+        password=PASSWORD,
+        host=HOST,
+        port=PORT,
+        dbname=DBNAME,
+    )
+    connection.autocommit = True
+    cursor = connection.cursor(row_factory=dict_row)
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS reports (
+            id SERIAL PRIMARY KEY,
+            flooded BOOLEAN NOT NULL,
+            level_category TEXT,
+            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
         )
+        """
+    )
+    print("Success: Supabase database synced")
 
 
 init_db()
 
-def _reset_db_keep_last_5(conn: sqlite3.Connection) -> None:
+def _reset_db_keep_last_5() -> None:
     """
     Delete everything except the 5 most recent rows by created_at.
     """
-    # Using rowid to avoid reinsert; faster and atomic within this transaction.
-    conn.execute("""
-                 DELETE FROM reports
-                 WHERE rowid NOT IN (
-                     SELECT rowid FROM reports
-                     ORDER BY created_at DESC
-                     LIMIT 5
-                 )
-                 """)
-    conn.commit()
+    if cursor is None:
+        return
 
-def get_reports() -> list[sqlite3.Row]:
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-        return conn.execute("SELECT flooded, level_category FROM reports").fetchall()
+    cursor.execute(
+        """
+        DELETE FROM reports
+        WHERE id NOT IN (
+            SELECT id FROM reports
+            ORDER BY created_at DESC, id DESC
+            LIMIT 5
+        )
+        """
+    )
+
+def get_reports() -> list[dict[str, Optional[str]]]:
+    if cursor is None:
+        return []
+
+    with _lock:
+        cursor.execute("SELECT flooded, level_category FROM reports")
+        rows = cursor.fetchall()
+    return [
+        {
+            "flooded": row["flooded"],
+            "level_category": row["level_category"],
+        }
+        for row in rows
+    ]
 
 
 def save_report(flooded: bool, level_category: Optional[str]) -> None:
@@ -91,22 +138,20 @@ def save_report(flooded: bool, level_category: Optional[str]) -> None:
     now = time.time()
 
     with _lock:
-        with sqlite3.connect(DB_PATH, timeout=5) as conn:
-            conn.execute(
-                "INSERT INTO reports (flooded, level_category) VALUES (?, ?)",
-                (1 if flooded else 0, level_category),
-            )
-            conn.commit()
+        if cursor is None:
+            return
 
-            # Mark that new data came in during this cycle.
-            new_data_since_last_reset = True
+        cursor.execute(
+            "INSERT INTO reports (flooded, level_category) VALUES (%s, %s)",
+            (flooded, level_category),
+        )
 
-            # If it's been >= 10 minutes since the last reset AND we have new data,
-            # perform a reset and start a fresh 10-minute window.
-            if (now - last_reset_time) >= 600 and new_data_since_last_reset:
-                _reset_db_keep_last_5(conn)
-                last_reset_time = now
-                new_data_since_last_reset = False
+        new_data_since_last_reset = True
+
+        if (now - last_reset_time) >= 600 and new_data_since_last_reset:
+            _reset_db_keep_last_5()
+            last_reset_time = now
+            new_data_since_last_reset = False
 
 
 def compute_status() -> tuple[dict, int]:
@@ -167,6 +212,74 @@ def compute_status() -> tuple[dict, int]:
         "level": None,
         "level_label": option["label"] if option else None,
     }, report_count
+
+
+def on_line_message(message_text: str, event: MessageEvent) -> Optional[str]:
+    """
+    Hook that is invoked whenever a LINE user sends a text message.
+    Return a string to reply with a text message, or None to skip replying.
+    """
+    app.logger.info("Received LINE message: %s", message_text)
+
+    if message_text == "สถานะปัจจุบัน":
+        # Query Flood Status If Flood >= 3 return "Flood" else return "Not Flood"
+        reports = get_reports()
+        flooded_count = sum(1 for row in reports if row.get("flooded"))
+        level_categories = [
+            row.get("level_category")
+            for row in reports
+            if row.get("flooded") and row.get("level_category")
+        ]
+        level_translation = None
+        if level_categories:
+            most_common_level, _ = Counter(level_categories).most_common(1)[0]
+            thai_level_map = {
+                "walkable": "ยังสามารถเดินผ่านได้",
+                "motorcycle": "รถจักรยานยนต์ผ่านไม่ได้",
+                "car": "รถยนต์ผ่านไม่ได้",
+            }
+            level_translation = thai_level_map.get(most_common_level, "ไม่มีข้อมูลระดับนํ้า")
+        if flooded_count >= 3:
+            if level_translation:
+                return "นํ้าท่วม 🌊 " + level_translation
+            return "นํ้าท่วม 🌊 ไม่มีข้อมูลระดับนํ้า"
+        return "น้ำไม่ท่วม"
+
+    return None
+
+
+if webhook_handler is not None and line_bot_api is not None:
+
+    @webhook_handler.add(MessageEvent, message=TextMessage)
+    def handle_text_message(event: MessageEvent) -> None:
+        response_text = on_line_message(event.message.text, event)
+        if response_text:
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text=response_text),
+            )
+
+
+@app.route("/line/webhook", methods=["POST"])
+def line_webhook():
+    if webhook_handler is None:
+        app.logger.warning("LINE webhook invoked but credentials are not configured.")
+        return "LINE webhook not configured", 503
+
+    signature = request.headers.get("X-Line-Signature")
+    if signature is None:
+        return "Missing signature", 400
+
+    body = request.get_data(as_text=True)
+    app.logger.debug("LINE webhook body: %s", body)
+
+    try:
+        webhook_handler.handle(body, signature)
+    except InvalidSignatureError:
+        app.logger.warning("Received invalid LINE signature.")
+        return "Invalid signature", 400
+
+    return "OK", 200
 
 
 @app.route("/", methods=["GET"])
