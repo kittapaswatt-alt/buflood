@@ -97,7 +97,19 @@ def _ensure_db_pool() -> ConnectionPool:
                     kwargs={"autocommit": True},
                     open=False,
                 )
-    return _db_pool
+
+    pool = _db_pool
+    if pool is None:
+        raise RuntimeError("Database pool initialisation failed")
+
+    if getattr(pool, "closed", False):
+        try:
+            pool.open(wait=True)
+            app.logger.info("Database connection pool opened")
+        except Exception:
+            app.logger.exception("Failed to open database connection pool")
+            raise
+    return pool
 
 
 @contextmanager
