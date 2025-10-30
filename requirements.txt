@@ -8,3 +8,4 @@ MarkupSafe
 Werkzeug
 psycopg[binary]
 requests
+line-bot-sdk
