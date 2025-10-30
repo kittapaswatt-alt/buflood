@@ -9,3 +9,4 @@ Werkzeug
 psycopg[binary]
 requests
 line-bot-sdk
+psycopg-pool
