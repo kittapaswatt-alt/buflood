@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from collections import Counter, OrderedDict
+from contextlib import contextmanager
 import os
+import socket
 from typing import Optional
 import threading
 import time
 
 import psycopg
 from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
 from flask import Flask, redirect, render_template, request, url_for
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -21,14 +24,15 @@ _lock = threading.Lock()
 
 MIN_REPORTS_FOR_STATUS = 3
 
-connection: Optional[psycopg.Connection] = None
-cursor: Optional[psycopg.Cursor] = None
+USER = os.getenv("DB_USER", "postgres")
+PASSWORD = os.getenv("DB_PASSWORD", ".Y-r+29YyHAc25*")
+HOST = os.getenv("DB_HOST", "db.hmmnvgilhcmofciknllv.supabase.co")
+PORT = int(os.getenv("DB_PORT", "5432"))
+DBNAME = os.getenv("DB_NAME", "postgres")
+DATABASE_URL = "postgresql://postgres:.Y-r+29YyHAc25*@db.hmmnvgilhcmofciknllv.supabase.co:5432/postgres"
 
-USER = "postgres"
-PASSWORD = ".Y-r+29YyHAc25*"
-HOST = "db.hmmnvgilhcmofciknllv.supabase.co"
-PORT = 5432
-DBNAME = "postgres"
+_db_pool: Optional[ConnectionPool] = None
+_db_pool_lock = threading.Lock()
 
 LINE_CHANNEL_SECRET = "d75e574d2c33a695d809b1df16553ad3"
 LINE_CHANNEL_ACCESS_TOKEN = "As4hEcmScsiZMrTmIMreUQ9EHm3MZUTVHhMYjr8jYBZwQ5AgI40J42t9c+r+JigZLmfpAILZ3KUpq0xwp8ULAtSX7MdmfmcaG0inOUBgq8cPPlekYWuUOBscDb2fbOpgj6JRgf57amWKWKngeKBmrQdB04t89/1O/w1cDnyilFU="
@@ -42,6 +46,67 @@ if LINE_CHANNEL_SECRET and LINE_CHANNEL_ACCESS_TOKEN:
 else:
     line_bot_api = None
     webhook_handler = None
+
+
+def _resolve_ipv4(host: str, port: int) -> Optional[str]:
+    try:
+        candidates = socket.getaddrinfo(
+            host, port, family=socket.AF_INET, type=socket.SOCK_STREAM
+        )
+    except socket.gaierror:
+        return None
+    if not candidates:
+        return None
+    return candidates[0][4][0]
+
+
+def _build_conninfo() -> str:
+    if DATABASE_URL:
+        return DATABASE_URL
+
+    hostaddr = os.getenv("DB_HOSTADDR")
+    if hostaddr is None and os.getenv("DB_FORCE_IPV4", "1") == "1":
+        hostaddr = _resolve_ipv4(HOST, PORT)
+
+    conn_params: dict[str, object] = {
+        "user": USER,
+        "password": PASSWORD,
+        "host": HOST,
+        "port": PORT,
+        "dbname": DBNAME,
+        "sslmode": os.getenv("DB_SSLMODE", "require"),
+    }
+    if hostaddr:
+        conn_params["hostaddr"] = hostaddr
+
+    return psycopg.conninfo.make_conninfo(**conn_params)
+
+
+def _ensure_db_pool() -> ConnectionPool:
+    global _db_pool
+
+    if _db_pool is None:
+        with _db_pool_lock:
+            if _db_pool is None:
+                conninfo = _build_conninfo()
+                _db_pool = ConnectionPool(
+                    conninfo,
+                    min_size=0,
+                    max_size=int(os.getenv("DB_POOL_MAX_SIZE", "5")),
+                    timeout=float(os.getenv("DB_POOL_TIMEOUT", "10")),
+                    kwargs={"autocommit": True},
+                    open=False,
+                )
+    return _db_pool
+
+
+@contextmanager
+def db_cursor():
+    pool = _ensure_db_pool()
+    timeout = float(os.getenv("DB_CONNECTION_TIMEOUT", "10"))
+    with pool.connection(timeout=timeout) as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            yield cur
 
 LEVEL_OPTIONS = OrderedDict(
     [
@@ -71,29 +136,23 @@ LEVEL_OPTIONS = OrderedDict(
 
 
 def init_db() -> None:
-    global connection, cursor
-
-    connection = psycopg.connect(
-        user=USER,
-        password=PASSWORD,
-        host=HOST,
-        port=PORT,
-        dbname=DBNAME,
-    )
-    connection.autocommit = True
-    cursor = connection.cursor(row_factory=dict_row)
-
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS reports (
-            id SERIAL PRIMARY KEY,
-            flooded BOOLEAN NOT NULL,
-            level_category TEXT,
-            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-        )
-        """
-    )
-    print("Success: Supabase database synced")
+    try:
+        with db_cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS reports (
+                    id SERIAL PRIMARY KEY,
+                    flooded BOOLEAN NOT NULL,
+                    level_category TEXT,
+                    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        app.logger.info("Success: Supabase database synced")
+    except psycopg.OperationalError as exc:
+        app.logger.error("Database setup failed: %s", exc)
+    except Exception:
+        app.logger.exception("Unexpected error while initialising the database")
 
 
 init_db()
@@ -102,32 +161,30 @@ def _reset_db_keep_last_5() -> None:
     """
     Delete everything except the 5 most recent rows by created_at.
     """
-    if cursor is None:
-        return
-
-    cursor.execute(
-        """
-        DELETE FROM reports
-        WHERE id NOT IN (
-            SELECT id FROM reports
-            ORDER BY created_at DESC, id DESC
-            LIMIT 5
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM reports
+            WHERE id NOT IN (
+                SELECT id FROM reports
+                ORDER BY created_at DESC, id DESC
+                LIMIT 5
+            )
+            """
         )
-        """
-    )
 
 def get_reports() -> list[dict[str, Optional[str]]]:
-    if cursor is None:
+    try:
+        with _lock:
+            with db_cursor() as cur:
+                cur.execute("SELECT flooded, level_category FROM reports")
+                rows = cur.fetchall()
+    except psycopg.OperationalError as exc:
+        app.logger.error("Unable to load reports: %s", exc)
         return []
 
-    with _lock:
-        cursor.execute("SELECT flooded, level_category FROM reports")
-        rows = cursor.fetchall()
     return [
-        {
-            "flooded": row["flooded"],
-            "level_category": row["level_category"],
-        }
+        {"flooded": row["flooded"], "level_category": row["level_category"]}
         for row in rows
     ]
 
@@ -138,20 +195,26 @@ def save_report(flooded: bool, level_category: Optional[str]) -> None:
     now = time.time()
 
     with _lock:
-        if cursor is None:
+        try:
+            with db_cursor() as cur:
+                cur.execute(
+                    "INSERT INTO reports (flooded, level_category) VALUES (%s, %s)",
+                    (flooded, level_category),
+                )
+        except psycopg.OperationalError as exc:
+            app.logger.error("Unable to save incoming report: %s", exc)
             return
-
-        cursor.execute(
-            "INSERT INTO reports (flooded, level_category) VALUES (%s, %s)",
-            (flooded, level_category),
-        )
 
         new_data_since_last_reset = True
 
         if (now - last_reset_time) >= 600 and new_data_since_last_reset:
-            _reset_db_keep_last_5()
-            last_reset_time = now
-            new_data_since_last_reset = False
+            try:
+                _reset_db_keep_last_5()
+            except psycopg.OperationalError as exc:
+                app.logger.error("Failed to prune historic reports: %s", exc)
+            else:
+                last_reset_time = now
+                new_data_since_last_reset = False
 
 
 def compute_status() -> tuple[dict, int]:
