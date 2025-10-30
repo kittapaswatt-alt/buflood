@@ -6,9 +6,8 @@ from typing import Optional
 import threading
 import time
 
-import psycopg2
-import psycopg2.extras
-from psycopg2.extensions import connection as PGConnection, cursor as PGCursor
+import psycopg
+from psycopg.rows import dict_row
 from flask import Flask, redirect, render_template, request, url_for
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -22,8 +21,8 @@ _lock = threading.Lock()
 
 MIN_REPORTS_FOR_STATUS = 3
 
-connection: Optional[PGConnection] = None
-cursor: Optional[PGCursor] = None
+connection: Optional[psycopg.Connection] = None
+cursor: Optional[psycopg.Cursor] = None
 
 USER = "postgres"
 PASSWORD = ".Y-r+29YyHAc25*"
@@ -74,7 +73,7 @@ LEVEL_OPTIONS = OrderedDict(
 def init_db() -> None:
     global connection, cursor
 
-    connection = psycopg2.connect(
+    connection = psycopg.connect(
         user=USER,
         password=PASSWORD,
         host=HOST,
@@ -82,7 +81,7 @@ def init_db() -> None:
         dbname=DBNAME,
     )
     connection.autocommit = True
-    cursor = connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cursor = connection.cursor(row_factory=dict_row)
 
     cursor.execute(
         """
