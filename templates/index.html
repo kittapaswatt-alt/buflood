@@ -25,8 +25,6 @@
         <p class="reports">Live data from {{ report_count }} report{{ '' if report_count == 1 else 's' }}</p>
         {% if request.args.get('thanks') %}
             <p class="flash success">Thank you for submitting your report!</p>
-        {% elif request.args.get('invalid') %}
-            <p class="flash error">Please choose valid options before submitting.</p>
         {% endif %}
     </header>
 
@@ -34,12 +32,13 @@
         <section class="panel">
             <h2>Share what you see</h2>
             <form action="{{ url_for('report') }}" method="post" class="report-form">
+                <p id="cooldown-message" class="flash" style="display: none;"></p>
                 <fieldset class="choice-group">
                     <div class="choice-buttons">
                         <input type="radio" id="status-flood" name="flooded" value="yes" required>
-                        <label for="status-flood" class="btn flood">Flooding</label>
+                        <label for="status-flood" class="btn label-btn flood">Flooding</label>
                         <input type="radio" id="status-clear" name="flooded" value="no" required>
-                        <label for="status-clear" class="btn clear">Not flooded</label>
+                        <label for="status-clear" class="btn label-btn clear">Not flooded</label>
                     </div>
                 </fieldset>
 
@@ -52,6 +51,7 @@
                         {% endfor %}
                     </div>
                 </fieldset>
+                <button type="submit" id="report-submit-proxy" hidden aria-hidden="true"></button>
             </form>
         </section>
 
@@ -68,14 +68,153 @@
 
     <script>
         document.addEventListener('DOMContentLoaded', function () {
+            const COOLDOWN_SECONDS = 60;
+            const COOKIE_NAME = 'reportCooldownUntil';
             const form = document.querySelector('.report-form');
-            const floodStatusButtons = document.querySelectorAll('input[name="flooded"]');
-            const levelButtons = document.querySelectorAll('input[name="level_category"]');
+            const floodStatusButtons = Array.from(document.querySelectorAll('input[name="flooded"]'));
+            const labelButtons = Array.from(document.querySelectorAll('.label-btn'))
+            const levelButtons = Array.from(document.querySelectorAll('input[name="level_category"]'));
+            const cooldownMessage = document.getElementById('cooldown-message');
+            const submitProxy = document.getElementById('report-submit-proxy');
+            let cooldownIntervalId = null;
+
+            console.log(labelButtons);
+            
+
+            if (!form || floodStatusButtons.length === 0) {
+                return;
+            }
+
+            function readCookie(name) {
+                return document.cookie
+                    .split(';')
+                    .map(part => part.trim())
+                    .find(part => part.startsWith(name + '='))
+                    ?.split('=')[1] || null;
+            }
+
+            function clearCooldownCookie() {
+                document.cookie = COOKIE_NAME + '=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
+            }
+
+            function setCooldownCookie(expiresAt) {
+                const maxAge = COOLDOWN_SECONDS + 5;
+                document.cookie = COOKIE_NAME + '=' + expiresAt + '; path=/; max-age=' + maxAge + '; SameSite=Lax';
+            }
+
+            function getRemainingSeconds() {
+                const cookieValue = readCookie(COOKIE_NAME);
+                if (!cookieValue) {
+                    return 0;
+                }
+                const expiresAt = parseInt(cookieValue, 10);
+                if (Number.isNaN(expiresAt)) {
+                    clearCooldownCookie();
+                    return 0;
+                }
+                const remainingMs = expiresAt - Date.now();
+                if (remainingMs <= 0) {
+                    clearCooldownCookie();
+                    return 0;
+                }
+                return Math.ceil(remainingMs / 1000);
+            }
+
+            function formatCooldown(remainingSeconds) {
+                const minutes = Math.floor(remainingSeconds / 60);
+                const seconds = remainingSeconds % 60;
+                return minutes + ':' + seconds.toString().padStart(2, '0');
+            }
+
+            function toggleInputs(disabled) {
+                floodStatusButtons.forEach(button => {
+                    button.disabled = disabled;
+                });
+                levelButtons.forEach(button => {
+                    button.disabled = disabled;
+                });
+            }
+
+            function updateCooldownMessage(remainingSeconds) {
+                if (!cooldownMessage) {
+                    return;
+                }
+                if (remainingSeconds > 0) {
+                    cooldownMessage.style.display = 'block';
+                    cooldownMessage.style.color = '#ffc107';
+                    cooldownMessage.textContent = 'Thanks for the update! You can send another report in ' + formatCooldown(remainingSeconds) + '.';
+                
+                    labelButtons.forEach((btn) => {
+                        btn.style.opacity = '.5'
+                    })
+
+                } else {
+                    cooldownMessage.style.display = 'none';
+                    cooldownMessage.textContent = '';
+
+                    labelButtons.forEach((btn) => {
+                        btn.style.opacity = '1'
+                    })
+                }
+            }
+
+            function refreshCooldownState() {
+                const remainingSeconds = getRemainingSeconds();
+                if (remainingSeconds > 0) {
+                    toggleInputs(true);
+                    updateCooldownMessage(remainingSeconds);
+                    if (!cooldownIntervalId) {
+                        cooldownIntervalId = setInterval(refreshCooldownState, 1000);
+                    }
+                } else {
+                    toggleInputs(false);
+                    updateCooldownMessage(0);
+                    if (cooldownIntervalId) {
+                        clearInterval(cooldownIntervalId);
+                        cooldownIntervalId = null;
+                    }
+                }
+            }
+
+            function startCooldown() {
+                const expiresAt = Date.now() + COOLDOWN_SECONDS * 1000;
+                setCooldownCookie(expiresAt);
+                if (cooldownIntervalId) {
+                    clearInterval(cooldownIntervalId);
+                    cooldownIntervalId = null;
+                }
+                setTimeout(refreshCooldownState, 0);
+            }
+
+            form.addEventListener('submit', function (event) {
+                const remainingSeconds = getRemainingSeconds();
+                if (remainingSeconds > 0) {
+                    event.preventDefault();
+                    refreshCooldownState();
+                    floodStatusButtons.forEach(button => {
+                        button.checked = false;
+                    });
+                    levelButtons.forEach(button => {
+                        button.checked = false;
+                    });
+                    return;
+                }
+                startCooldown();
+            });
+
             floodStatusButtons.forEach(button => {
                 button.addEventListener('change', () => {
+                    if (typeof form.requestSubmit === 'function') {
+                        form.requestSubmit();
+                    } else if (submitProxy) {
+                        submitProxy.click();
+                    } else {
                         form.submit();
+                    }
                 });
             });
+
+            refreshCooldownState();
         });
     </script>
 </body>
