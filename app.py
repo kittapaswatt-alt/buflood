@@ -21,15 +21,30 @@ app = Flask(__name__)
 last_reset_time = time.time()
 new_data_since_last_reset = False
 _lock = threading.Lock()
+_schema_initialized = False
+_schema_lock = threading.Lock()
 
 MIN_REPORTS_FOR_STATUS = 3
 
-USER = os.getenv("DB_USER", "postgres")
+DB_POOL_URL = os.getenv("DATABASE_POOL_URL") or os.getenv("SUPABASE_POOL_URL")
+DB_DIRECT_URL = os.getenv("DATABASE_URL") or os.getenv("SUPABASE_DB_URL")
+
+USER = os.getenv("DB_USER", "postgres.hmmnvgilhcmofciknllv")
 PASSWORD = os.getenv("DB_PASSWORD", ".Y-r+29YyHAc25*")
-HOST = os.getenv("DB_HOST", "db.hmmnvgilhcmofciknllv.supabase.co")
-PORT = int(os.getenv("DB_PORT", "5432"))
+HOST = os.getenv("DB_HOST", "aws-1-ap-southeast-2.pooler.supabase.com")
+PORT = int(os.getenv("DB_PORT", "6543"))
 DBNAME = os.getenv("DB_NAME", "postgres")
-DATABASE_URL = "postgresql://postgres:.Y-r+29YyHAc25*@db.hmmnvgilhcmofciknllv.supabase.co:5432/postgres"
+SSL_MODE = os.getenv("DB_SSLMODE", "require")
+FORCE_IPV4 = os.getenv("DB_FORCE_IPV4", "1") == "1"
+USE_DB_POOL = os.getenv("DB_USE_POOL", "1").lower() not in {"0", "false", "no"}
+APPLICATION_NAME = os.getenv("DB_APPLICATION_NAME", "buflood-web")
+POOL_MIN_SIZE = int(os.getenv("DB_POOL_MIN_SIZE", "0"))
+POOL_MAX_SIZE = int(os.getenv("DB_POOL_MAX_SIZE", "3"))
+POOL_TIMEOUT = float(os.getenv("DB_POOL_TIMEOUT", "3"))
+CONNECTION_TIMEOUT = float(os.getenv("DB_CONNECTION_TIMEOUT", "3"))
+PGBOUNCER_MODE = os.getenv("PGBOUNCER", "0").lower() in {"1", "true", "yes"}
+
+_PRIMARY_CONNINFO = DB_POOL_URL if (USE_DB_POOL and DB_POOL_URL) else DB_DIRECT_URL
 
 _db_pool: Optional[ConnectionPool] = None
 _db_pool_lock = threading.Lock()
@@ -61,11 +76,11 @@ def _resolve_ipv4(host: str, port: int) -> Optional[str]:
 
 
 def _build_conninfo() -> str:
-    if DATABASE_URL:
-        return DATABASE_URL
+    if _PRIMARY_CONNINFO:
+        return psycopg.conninfo.make_conninfo(_PRIMARY_CONNINFO)
 
     hostaddr = os.getenv("DB_HOSTADDR")
-    if hostaddr is None and os.getenv("DB_FORCE_IPV4", "1") == "1":
+    if hostaddr is None and FORCE_IPV4:
         hostaddr = _resolve_ipv4(HOST, PORT)
 
     conn_params: dict[str, object] = {
@@ -74,12 +89,23 @@ def _build_conninfo() -> str:
         "host": HOST,
         "port": PORT,
         "dbname": DBNAME,
-        "sslmode": os.getenv("DB_SSLMODE", "require"),
+        "sslmode": SSL_MODE,
     }
     if hostaddr:
         conn_params["hostaddr"] = hostaddr
 
     return psycopg.conninfo.make_conninfo(**conn_params)
+
+
+def _connection_kwargs() -> dict[str, object]:
+    kwargs: dict[str, object] = {
+        "autocommit": True,
+        "connect_timeout": CONNECTION_TIMEOUT,
+        "application_name": APPLICATION_NAME,
+    }
+    if PGBOUNCER_MODE:
+        kwargs["prepare_threshold"] = 0
+    return kwargs
 
 
 def _ensure_db_pool() -> ConnectionPool:
@@ -91,10 +117,10 @@ def _ensure_db_pool() -> ConnectionPool:
                 conninfo = _build_conninfo()
                 _db_pool = ConnectionPool(
                     conninfo,
-                    min_size=0,
-                    max_size=int(os.getenv("DB_POOL_MAX_SIZE", "5")),
-                    timeout=float(os.getenv("DB_POOL_TIMEOUT", "3")),
-                    kwargs={"autocommit": True},
+                    min_size=POOL_MIN_SIZE,
+                    max_size=POOL_MAX_SIZE,
+                    timeout=POOL_TIMEOUT,
+                    kwargs=_connection_kwargs(),
                     open=False,
                 )
 
@@ -114,9 +140,17 @@ def _ensure_db_pool() -> ConnectionPool:
 
 @contextmanager
 def db_cursor():
-    pool = _ensure_db_pool()
-    timeout = float(os.getenv("DB_CONNECTION_TIMEOUT", "3"))
-    with pool.connection(timeout=timeout) as conn:
+    conninfo = _build_conninfo()
+    conn_kwargs = _connection_kwargs()
+
+    if USE_DB_POOL:
+        pool = _ensure_db_pool()
+        with pool.connection(timeout=CONNECTION_TIMEOUT) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                yield cur
+        return
+
+    with psycopg.connect(conninfo, connect_timeout=CONNECTION_TIMEOUT, **conn_kwargs) as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             yield cur
 
@@ -167,9 +201,23 @@ def init_db() -> None:
         app.logger.exception("Unexpected error while initialising the database")
 
 
-@app.before_first_request
 def _ensure_schema() -> None:
-    init_db()
+    global _schema_initialized
+
+    if _schema_initialized:
+        return
+
+    with _schema_lock:
+        if _schema_initialized:
+            return
+        init_db()
+        _schema_initialized = True
+
+
+@app.before_request
+def _bootstrap_schema() -> None:
+    _ensure_schema()
+
 def _reset_db_keep_last_5() -> None:
     """
     Delete everything except the 5 most recent rows by created_at.
