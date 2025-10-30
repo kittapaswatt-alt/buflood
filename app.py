@@ -93,7 +93,7 @@ def _ensure_db_pool() -> ConnectionPool:
                     conninfo,
                     min_size=0,
                     max_size=int(os.getenv("DB_POOL_MAX_SIZE", "5")),
-                    timeout=float(os.getenv("DB_POOL_TIMEOUT", "10")),
+                    timeout=float(os.getenv("DB_POOL_TIMEOUT", "3")),
                     kwargs={"autocommit": True},
                     open=False,
                 )
@@ -104,7 +104,7 @@ def _ensure_db_pool() -> ConnectionPool:
 
     if getattr(pool, "closed", False):
         try:
-            pool.open(wait=True)
+            pool.open(wait=False)
             app.logger.info("Database connection pool opened")
         except Exception:
             app.logger.exception("Failed to open database connection pool")
@@ -115,7 +115,7 @@ def _ensure_db_pool() -> ConnectionPool:
 @contextmanager
 def db_cursor():
     pool = _ensure_db_pool()
-    timeout = float(os.getenv("DB_CONNECTION_TIMEOUT", "10"))
+    timeout = float(os.getenv("DB_CONNECTION_TIMEOUT", "3"))
     with pool.connection(timeout=timeout) as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             yield cur
@@ -167,8 +167,9 @@ def init_db() -> None:
         app.logger.exception("Unexpected error while initialising the database")
 
 
-init_db()
-
+@app.before_first_request
+def _ensure_schema() -> None:
+    init_db()
 def _reset_db_keep_last_5() -> None:
     """
     Delete everything except the 5 most recent rows by created_at.
